@@ -1,0 +1,60 @@
+# Loom configuration (server).
+# Producers connect and stream messages; consumers connect and receive routed streams.
+
+# Transport to use:
+# - quic: raw QUIC streams (quic-go)
+# - h3: HTTP/3 (quic-go/http3)
+transport: quic
+
+server:
+  addr: ":4242"
+  tls:
+    # For production, set cert_file/key_file and set insecure_skip_verify to false on clients.
+    cert_file: ""
+    key_file: ""
+    ca_file: ""
+    client_ca_file: ""
+    require_client_cert: false
+    server_name: ""
+    insecure_skip_verify: true
+
+admin:
+  addr: ":9090"
+  enable_pprof: true
+
+auth:
+  # disabled | token | mtls | both
+  mode: disabled
+  tokens: []
+  certs: []
+
+router:
+  # Fixed partition count. Keys map to partitions, partitions map to consumers.
+  partition_count: 64
+
+  # Hard limits.
+  max_message_bytes: 268435456  # 256 MiB
+  max_chunk_bytes: 65536        # 64 KiB
+
+  # Handshake bounds.
+  max_name_bytes: 128
+  max_room_bytes: 128
+  max_token_bytes: 1024
+  max_key_bytes: 256
+
+  # Backlog controls (message count per selected consumer).
+  max_backlog_depth: 128
+
+  # Per-message chunk buffering is derived from max_chunk_bytes (target ~1MiB).
+
+  # Behavior when the selected consumer backlog is full.
+  # - drop_newest: discard the incoming message (best-effort)
+  # - drop_oldest: discard the oldest queued message to make room
+  # - block: apply backpressure to the producer stream
+  partition_full_behavior: drop_oldest
+
+  # Behavior when per-message chunk queue is full.
+  # - drop: discard the whole message
+  # - block: apply backpressure to the producer stream
+  chunk_full_behavior: drop
+
