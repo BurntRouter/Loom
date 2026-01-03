@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"log"
+	"time"
 
 	"github.com/BurntRouter/Loom/internal/auth"
 	"github.com/BurntRouter/Loom/internal/config"
@@ -32,6 +33,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	quicConf := s.QUIC
 	if quicConf == nil {
 		quicConf = &quic.Config{}
+	}
+	if quicConf.KeepAlivePeriod == 0 {
+		quicConf.KeepAlivePeriod = 15 * time.Second
 	}
 	listener, err := quic.ListenAddr(s.Addr, tlsConf, quicConf)
 	if err != nil {
