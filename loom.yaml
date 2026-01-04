@@ -10,8 +10,8 @@ server:
   addr: ":4242"
   tls:
     # For production, set cert_file/key_file and set insecure_skip_verify to false on clients.
-    cert_file: ""
-    key_file: ""
+    cert_file: "./cert.pem"
+    key_file: "./key.pem"
     ca_file: ""
     client_ca_file: ""
     require_client_cert: false
@@ -58,3 +58,15 @@ router:
   # - block: apply backpressure to the producer stream
   chunk_full_behavior: drop
 
+# Optional per-room overrides.
+# If a room is not listed here, it uses the global router settings above.
+rooms:
+  - name: room1
+    maxdepth: 64
+    partition_full_behavior: drop_oldest
+    queue_type: fanout
+
+  - name: room2
+    maxdepth: 32
+    partition_full_behavior: block
+    queue_type: partitioned

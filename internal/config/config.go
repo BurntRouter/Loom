@@ -14,6 +14,8 @@ type PartitionFullBehavior string
 
 type ChunkFullBehavior string
 
+type QueueType string
+
 const (
 	TransportQUIC Transport = "quic"
 	TransportH3   Transport = "h3"
@@ -25,6 +27,9 @@ const (
 	// ChunkFullDrop drops the whole message when the per-message chunk queue is full.
 	ChunkFullDrop  ChunkFullBehavior = "drop"
 	ChunkFullBlock ChunkFullBehavior = "block"
+
+	QueueTypePartitioned QueueType = "partitioned"
+	QueueTypeFanout      QueueType = "fanout"
 )
 
 type Config struct {
@@ -34,11 +39,23 @@ type Config struct {
 	Admin  AdminConfig  `yaml:"admin"`
 	Auth   AuthConfig   `yaml:"auth"`
 	Router RouterConfig `yaml:"router"`
+
+	Rooms []RoomConfig `yaml:"rooms"`
 }
 
 type ServerConfig struct {
 	Addr string    `yaml:"addr"`
 	TLS  TLSConfig `yaml:"tls"`
+}
+
+type RoomConfig struct {
+	Name string `yaml:"name"`
+
+	MaxDepth int `yaml:"maxdepth"`
+
+	PartitionFullBehavior PartitionFullBehavior `yaml:"partition_full_behavior"`
+	ParitionFullBehavior  PartitionFullBehavior `yaml:"parition_full_behavior"` // tolerate common misspelling
+	QueueType             QueueType             `yaml:"queue_type"`
 }
 
 type RouterConfig struct {
@@ -137,6 +154,37 @@ func (c *Config) Validate() error {
 	}
 	if c.Router.ChunkFullBehavior != ChunkFullDrop && c.Router.ChunkFullBehavior != ChunkFullBlock {
 		return fmt.Errorf("config: unknown router.chunk_full_behavior %q", c.Router.ChunkFullBehavior)
+	}
+
+	seenRooms := map[string]struct{}{}
+	for i := range c.Rooms {
+		rc := &c.Rooms[i]
+		if rc.Name == "" {
+			return errors.New("config: rooms.name is required")
+		}
+		if _, ok := seenRooms[rc.Name]; ok {
+			return fmt.Errorf("config: duplicate room %q", rc.Name)
+		}
+		seenRooms[rc.Name] = struct{}{}
+		if rc.MaxDepth < 0 {
+			return fmt.Errorf("config: rooms[%q].maxdepth must be >= 0", rc.Name)
+		}
+		if rc.PartitionFullBehavior == "" && rc.ParitionFullBehavior != "" {
+			rc.PartitionFullBehavior = rc.ParitionFullBehavior
+		}
+		// Backward compatibility: "drop" means drop_newest.
+		if rc.PartitionFullBehavior == "drop" {
+			rc.PartitionFullBehavior = PartitionFullDropNewest
+		}
+		if rc.PartitionFullBehavior != "" && rc.PartitionFullBehavior != PartitionFullDropNewest && rc.PartitionFullBehavior != PartitionFullDropOldest && rc.PartitionFullBehavior != PartitionFullBlock {
+			return fmt.Errorf("config: unknown rooms[%q].partition_full_behavior %q", rc.Name, rc.PartitionFullBehavior)
+		}
+		if rc.QueueType == "" {
+			rc.QueueType = QueueTypePartitioned
+		}
+		if rc.QueueType != QueueTypePartitioned && rc.QueueType != QueueTypeFanout {
+			return fmt.Errorf("config: unknown rooms[%q].queue_type %q", rc.Name, rc.QueueType)
+		}
 	}
 
 	if c.Server.Addr == "" {

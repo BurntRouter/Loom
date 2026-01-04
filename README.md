@@ -10,8 +10,9 @@ It is designed for “Kafka/MQ-like” partition routing, but optimized for **bi
 - Limits and behavior are controlled by `loom.yaml`:
   - `router.max_message_bytes` (default 256MiB)
   - `router.max_chunk_bytes` (default 64KiB)
-  - backlog and backpressure behavior for full partitions / chunk pressure
+  - backlog and backpressure behavior
   - per-message chunk buffering is derived from `max_chunk_bytes` (target ~1MiB)
+  - optional `rooms:` section for per-room overrides, including `queue_type: partitioned|fanout`
 
 ## Run with Docker
 

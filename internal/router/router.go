@@ -31,6 +31,7 @@ type Config struct {
 
 	PartitionFullBehavior string
 	ChunkFullBehavior     string
+	QueueType             string
 }
 
 const (
@@ -40,6 +41,9 @@ const (
 
 	ChunkFullDrop  = "drop" // drops the whole message on chunk queue pressure
 	ChunkFullBlock = "block"
+
+	QueueTypePartitioned = "partitioned"
+	QueueTypeFanout      = "fanout"
 )
 
 func defaultMessageChunkQueue(maxChunkBytes int) int {
@@ -66,6 +70,7 @@ func DefaultConfig() Config {
 		ConsumerQueueDepth:    128,
 		PartitionFullBehavior: PartitionFullDropNewest,
 		ChunkFullBehavior:     ChunkFullDrop,
+		QueueType:             QueueTypePartitioned,
 	}
 	cfg.MessageChunkQueue = defaultMessageChunkQueue(cfg.MaxChunkBytes)
 	return cfg
@@ -226,6 +231,8 @@ func (r *Router) runConsumerReader(c *consumerState) {
 	for {
 		ft, msgID, err := protocol.ReadFrame(br)
 		if err != nil {
+			// Ensure writer/unregister runs promptly even if Context() isn't cancelled yet.
+			_ = c.stream.Close()
 			return
 		}
 		if ft != protocol.FrameAck {
@@ -259,6 +266,173 @@ func (r *Router) HandleProducer(ctx context.Context, br *bufio.Reader) error {
 		if hdr.DeclaredSize > 0 && uint64(hdr.DeclaredSize) > r.cfg.MaxMessageBytes {
 			if err := protocol.DiscardMessage(br, r.cfg.MaxChunkBytes); err != nil {
 				return err
+			}
+			continue
+		}
+
+		// Choose queueing strategy per-room.
+		if r.cfg.QueueType == QueueTypeFanout {
+			r.mu.RLock()
+			consumers := make([]*consumerState, 0, len(r.consumers))
+			for _, c := range r.consumers {
+				if c.active.Load() {
+					consumers = append(consumers, c)
+				}
+			}
+			r.mu.RUnlock()
+			if len(consumers) == 0 {
+				if err := protocol.DiscardMessage(br, r.cfg.MaxChunkBytes); err != nil {
+					return err
+				}
+				continue
+			}
+
+			msgID := r.msgSeq.Add(1)
+			type target struct {
+				c   *consumerState
+				msg *routedMessage
+			}
+			targets := make([]target, 0, len(consumers))
+
+			for _, c := range consumers {
+				select {
+				case <-c.done:
+					continue
+				default:
+				}
+				msg := &routedMessage{
+					key:          hdr.Key,
+					declaredSize: hdr.DeclaredSize,
+					msgID:        msgID,
+					chunks:       make(chan []byte, r.cfg.MessageChunkQueue),
+					acked:        make(chan struct{}),
+				}
+
+				queued := false
+				switch r.cfg.PartitionFullBehavior {
+				case PartitionFullBlock:
+					select {
+					case c.send <- msg:
+						queued = true
+					case <-c.done:
+						close(msg.chunks)
+						msg.markAcked(false)
+					case <-ctx.Done():
+						close(msg.chunks)
+						msg.markAcked(false)
+						return ctx.Err()
+					}
+				case PartitionFullDropOldest:
+					select {
+					case c.send <- msg:
+						queued = true
+					default:
+						select {
+						case dropped := <-c.send:
+							dropped.canceled.Store(true)
+						default:
+						}
+						select {
+						case c.send <- msg:
+							queued = true
+						default:
+							close(msg.chunks)
+							msg.markAcked(false)
+						}
+					}
+				default: // drop newest
+					select {
+					case c.send <- msg:
+						queued = true
+					default:
+						close(msg.chunks)
+						msg.markAcked(false)
+					}
+				}
+				if queued {
+					targets = append(targets, target{c: c, msg: msg})
+				}
+			}
+
+			dropped := false
+			var total uint64
+		readFanout:
+			for {
+				chunk, done, err := protocol.ReadChunk(br, r.cfg.MaxChunkBytes)
+				if err != nil {
+					for _, t := range targets {
+						close(t.msg.chunks)
+						t.msg.markAcked(false)
+					}
+					return err
+				}
+				if done {
+					for _, t := range targets {
+						close(t.msg.chunks)
+					}
+					for _, t := range targets {
+						select {
+						case <-t.msg.acked:
+						case <-t.c.done:
+							t.msg.markAcked(false)
+						case <-ctx.Done():
+							t.msg.markAcked(false)
+							return ctx.Err()
+						}
+					}
+					break
+				}
+
+				total += uint64(len(chunk))
+				if total > r.cfg.MaxMessageBytes {
+					dropped = true
+					for _, t := range targets {
+						close(t.msg.chunks)
+						t.msg.markAcked(false)
+					}
+					if err := protocol.DiscardMessage(br, r.cfg.MaxChunkBytes); err != nil {
+						return err
+					}
+					break readFanout
+				}
+
+				if dropped {
+					continue
+				}
+
+				for _, t := range targets {
+					if t.msg.canceled.Load() {
+						continue
+					}
+					select {
+					case <-t.c.done:
+						t.msg.canceled.Store(true)
+						t.msg.markAcked(false)
+					default:
+					}
+					switch r.cfg.ChunkFullBehavior {
+					case ChunkFullBlock:
+						select {
+						case t.msg.chunks <- chunk:
+						case <-t.c.done:
+							t.msg.canceled.Store(true)
+							t.msg.markAcked(false)
+						case <-ctx.Done():
+							for _, t2 := range targets {
+								close(t2.msg.chunks)
+								t2.msg.markAcked(false)
+							}
+							return ctx.Err()
+						}
+					default:
+						select {
+						case t.msg.chunks <- chunk:
+						default:
+							t.msg.canceled.Store(true)
+							t.msg.markAcked(false)
+						}
+					}
+				}
 			}
 			continue
 		}
