@@ -120,10 +120,10 @@ func ReadMessageHeader(r *bufio.Reader, maxKeyBytes int) (MessageHeader, error) 
 		return MessageHeader{}, err
 	}
 	if keyLen == 0 {
-		return MessageHeader{}, errors.New("protocol: empty key")
+		return MessageHeader{}, errors.New("protocol: empty key - possible stream corruption")
 	}
 	if keyLen > uint64(maxKeyBytes) {
-		return MessageHeader{}, fmt.Errorf("protocol: key too large: %d", keyLen)
+		return MessageHeader{}, fmt.Errorf("protocol: key too large: %d (max %d) - stream likely corrupted", keyLen, maxKeyBytes)
 	}
 	key := make([]byte, int(keyLen))
 	if _, err := io.ReadFull(r, key); err != nil {
@@ -169,7 +169,7 @@ func ReadChunk(r *bufio.Reader, maxChunkBytes int) (chunk []byte, done bool, err
 		return nil, true, nil
 	}
 	if n > uint64(maxChunkBytes) {
-		return nil, false, fmt.Errorf("protocol: chunk too large: %d", n)
+		return nil, false, fmt.Errorf("protocol: chunk too large: %d (max %d) - stream likely corrupted", n, maxChunkBytes)
 	}
 	buf := make([]byte, int(n))
 	if _, err := io.ReadFull(r, buf); err != nil {
@@ -203,7 +203,7 @@ func DiscardMessage(r *bufio.Reader, maxChunkBytes int) error {
 			return nil
 		}
 		if n > uint64(maxChunkBytes) {
-			return fmt.Errorf("protocol: chunk too large: %d", n)
+			return fmt.Errorf("protocol: chunk too large: %d (max %d) - stream corrupted, cannot skip", n, maxChunkBytes)
 		}
 		if _, err := io.CopyN(io.Discard, r, int64(n)); err != nil {
 			return err
@@ -222,6 +222,10 @@ func readUvarint(r *bufio.Reader) (uint64, error) {
 	v, err := binary.ReadUvarint(r)
 	if err != nil {
 		return 0, err
+	}
+	// Sanity check: varints larger than 1PB (2^50) are almost certainly corruption
+	if v > 1<<50 {
+		return 0, fmt.Errorf("protocol: invalid varint value %d - stream corrupted", v)
 	}
 	return v, nil
 }

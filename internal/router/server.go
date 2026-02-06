@@ -129,9 +129,51 @@ func (s *Server) handleStream(ctx context.Context, conn *quic.Conn, stream *quic
 		case <-stream.Context().Done():
 		}
 	case protocol.RoleProducer:
+		// Check if this producer is blocked due to repeated errors
+		if s.Rooms.errorTracker != nil {
+			producerKey := room + ":" + name + ":" + conn.RemoteAddr().String()
+			if s.Rooms.errorTracker.IsBlocked(producerKey) {
+				log.Printf("loom: rejecting blocked producer room=%q name=%q addr=%s", room, name, conn.RemoteAddr())
+				metrics.BlockedProducers.WithLabelValues(room).Inc()
+				_ = stream.Close()
+				return
+			}
+		}
+
 		if err := r.HandleProducer(ctx, br); err != nil {
 			if !errors.Is(err, context.Canceled) {
-				log.Printf("loom: producer stream error room=%q: %v", room, err)
+				remoteAddr := conn.RemoteAddr().String()
+				producerKey := room + ":" + name + ":" + remoteAddr
+
+				// Check if this is a protocol error (likely client bug)
+				errMsg := err.Error()
+				isProtocolError := errors.Is(err, protocol.ErrBadHandshake) ||
+					errMsg == "protocol: empty key - possible stream corruption" ||
+					(len(errMsg) > 9 && errMsg[:9] == "protocol:")
+
+				if isProtocolError {
+					// Categorize error type for metrics
+					errorType := "unknown"
+					if errMsg == "protocol: empty key - possible stream corruption" {
+						errorType = "empty_key"
+					} else if len(errMsg) > 20 && errMsg[:20] == "protocol: chunk too" {
+						errorType = "chunk_too_large"
+					} else if len(errMsg) > 19 && errMsg[:19] == "protocol: key too" {
+						errorType = "key_too_large"
+					} else if len(errMsg) > 25 && errMsg[:25] == "protocol: invalid varint" {
+						errorType = "invalid_varint"
+					}
+					metrics.ProtocolErrors.WithLabelValues(room, errorType).Inc()
+
+					if s.Rooms.errorTracker != nil {
+						if blocked := s.Rooms.errorTracker.RecordError(producerKey); blocked {
+							metrics.BlockedProducers.WithLabelValues(room).Inc()
+							log.Printf("loom: BLOCKED producer due to repeated protocol errors room=%q name=%q addr=%s", room, name, remoteAddr)
+						}
+					}
+				}
+
+				log.Printf("loom: producer stream error room=%q name=%q addr=%s: %v", room, name, remoteAddr, err)
 			}
 		}
 		_ = stream.Close()

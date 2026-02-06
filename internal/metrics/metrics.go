@@ -31,8 +31,16 @@ var (
 		prometheus.CounterOpts{Name: "loom_drops_total", Help: "Dropped messages"},
 		[]string{"room", "reason"},
 	)
+	ProtocolErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loom_protocol_errors_total", Help: "Protocol errors from producers"},
+		[]string{"room", "error_type"},
+	)
+	BlockedProducers = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loom_blocked_producers_total", Help: "Producers blocked due to repeated errors"},
+		[]string{"room"},
+	)
 )
 
 func Register() {
-	prometheus.MustRegister(Connections, Streams, MessagesIn, MessagesOut, BytesIn, BytesOut, Drops)
+	prometheus.MustRegister(Connections, Streams, MessagesIn, MessagesOut, BytesIn, BytesOut, Drops, ProtocolErrors, BlockedProducers)
 }
